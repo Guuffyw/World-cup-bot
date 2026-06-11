@@ -515,11 +515,11 @@ client.once('ready', async () => {
   await initDB();
   await restoreActiveMatches();
 
-  cron.schedule('0 8 * * *', () => {
-    console.log('⏰ Daily match announcement triggered');
+  cron.schedule('0 0 * * *', () => {
     announceTodaysMatches();
+  }, {
+    timezone: "Europe/Budapest"
   });
-
   announceTodaysMatches();
 });
 

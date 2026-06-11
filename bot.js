@@ -502,15 +502,19 @@ client.on('messageCreate', async msg => {
     const tallyEmbed = buildVoteTallyEmbed(entry.match, entry.votes);
     await msg.reply({ embeds: [tallyEmbed] });
   }
+
+  if (msg.content === '!wc debug') {
+    const lines = [];
+    for (const [key, entry] of activeMatches.entries()) {
+      lines.push(`key: \`${key}\` (${typeof key}) — ${entry.match.homeTeam.name} vs ${entry.match.awayTeam.name} — votes: ${Object.keys(entry.votes).length}`);
+    }
+    await msg.reply(lines.length ? lines.join('\n') : 'No active matches in memory.');
+  }
+
+  
 });
 
-if (msg.content === '!wc debug') {
-  const lines = [];
-  for (const [key, entry] of activeMatches.entries()) {
-    lines.push(`key: \`${key}\` (${typeof key}) — ${entry.match.homeTeam.name} vs ${entry.match.awayTeam.name} — votes: ${Object.keys(entry.votes).length}`);
-  }
-  await msg.reply(lines.length ? lines.join('\n') : 'No active matches in memory.');
-}
+
 
 // ─── Startup ──────────────────────────────────────────────────────────────────
 

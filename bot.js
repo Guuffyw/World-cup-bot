@@ -512,6 +512,17 @@ client.on('messageCreate', async msg => {
     await msg.reply(lines.length ? lines.join('\n') : 'No active matches in memory.');
   }
 
+  if (msg.content.startsWith('!wc raw ')) {
+  const id = Number(msg.content.split(' ')[2]);
+  if (!id) return msg.reply('Usage: `!wc raw <matchId>`');
+  try {
+    const result = await fetchMatchResult(id);
+    await msg.reply('```json\n' + JSON.stringify(result?.score, null, 2) + '\n```');
+  } catch (err) {
+    await msg.reply(`❌ ${err.message}`);
+  }
+ } 
+
   
 });
 

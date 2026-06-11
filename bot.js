@@ -363,6 +363,7 @@ async function resolveMatch(matchId) {
   let result;
   try {
     result = await fetchMatchResult(matchId);
+    console.log(`🔍 Raw API result for ${matchId}:`, JSON.stringify(result, null, 2));
   } catch (err) {
     console.error(`❌ Could not fetch result for ${matchId}:`, err.message);
     setTimeout(() => resolveMatch(matchId), 5 * 60 * 1000);

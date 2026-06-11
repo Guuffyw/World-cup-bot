@@ -377,10 +377,17 @@ async function resolveMatch(matchId) {
     return;
   }
 
-  // Determine outcome
-  const homeGoals = result.score?.fullTime?.home ?? 0;
-  const awayGoals = result.score?.fullTime?.away ?? 0;
-  const outcome   = homeGoals > awayGoals ? '1' : homeGoals === awayGoals ? 'X' : '2';
+  // Guard against API returning null scores even when FINISHED
+  const homeGoals = result.score?.fullTime?.home;
+  const awayGoals = result.score?.fullTime?.away;
+
+  if (homeGoals === null || homeGoals === undefined || awayGoals === null || awayGoals === undefined) {
+    console.log(`⏳ Match ${matchId} finished but scores not populated yet, retrying in 2 min…`);
+    setTimeout(() => resolveMatch(matchId), 2 * 60 * 1000);
+    return;
+  }
+
+  const outcome = homeGoals > awayGoals ? '1' : homeGoals === awayGoals ? 'X' : '2';
 
   entry.resolved = true;
   entry.match    = result;

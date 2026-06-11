@@ -134,21 +134,20 @@ async function dbGetLeaderboard(limit = 15) {
 const activeMatches = new Map();
 
 async function restoreActiveMatches() {
-  const res = await pool.query(
-    `SELECT * FROM matches WHERE resolved = FALSE`
-  );
+  const res = await pool.query(`SELECT * FROM matches WHERE resolved = FALSE`);
   for (const row of res.rows) {
-    const votes = await dbGetVotes(row.match_id);
-    activeMatches.set(row.match_id, {
+    const matchId = Number(row.match_id); // ← cast here
+    const votes = await dbGetVotes(matchId);
+    activeMatches.set(matchId, {
       match: {
-        id: row.match_id,
+        id: matchId,                          // ← also cast here
         homeTeam: { name: row.home_team },
         awayTeam: { name: row.away_team },
         utcDate: row.kickoff_utc,
         stage: row.stage,
       },
       votes,
-      messageId: null,   // Can't recover message ID after restart — that's fine
+      messageId: null,
       channelId: process.env.ANNOUNCE_CHANNEL_ID,
       resolved: false,
     });
@@ -504,6 +503,14 @@ client.on('messageCreate', async msg => {
     await msg.reply({ embeds: [tallyEmbed] });
   }
 });
+
+if (msg.content === '!wc debug') {
+  const lines = [];
+  for (const [key, entry] of activeMatches.entries()) {
+    lines.push(`key: \`${key}\` (${typeof key}) — ${entry.match.homeTeam.name} vs ${entry.match.awayTeam.name} — votes: ${Object.keys(entry.votes).length}`);
+  }
+  await msg.reply(lines.length ? lines.join('\n') : 'No active matches in memory.');
+}
 
 // ─── Startup ──────────────────────────────────────────────────────────────────
 

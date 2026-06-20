@@ -2,6 +2,7 @@ const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder
 const cron = require('node-cron');
 const axios = require('axios');
 const { Pool } = require('pg');
+let announceInProgress = false;
 require('dotenv').config();
 
 const client = new Client({
@@ -337,57 +338,75 @@ async function safeEditMatchMessage(entry, matchId) {
 // ─── Announce today's matches ─────────────────────────────────────────────────
 
 async function announceTodaysMatches() {
-  console.log(`🔍 ANNOUNCE_CHANNEL_ID: ${ANNOUNCE_CHANNEL_ID}`);
-  const channel = await client.channels.fetch(ANNOUNCE_CHANNEL_ID).catch(err => {
-    console.error('❌ Failed to fetch channel:', err.message);
-    return null;
-  });
-  if (!channel) return console.error('❌ Announce channel not found.');
+  if (announceInProgress) {
+    console.log('⚠️  announceTodaysMatches already running, skipping duplicate call');
+    return;
+  }
+  announceInProgress = true;
 
-  let matches;
   try {
-    matches = await fetchTodaysMatches();
-  } catch (err) {
-    console.error('❌ Failed to fetch fixtures:', err.response?.data || err.message);
-    channel.send(`❌ API error: ${err.response?.data?.message || err.message}`);
-    return;
-  }
-
-  if (!matches.length) {
-    channel.send('📅 No World Cup matches today. Check back tomorrow!');
-    return;
-  }
-
-  for (const match of matches) {
-    const matchId = match.id;
-    if (activeMatches.has(matchId)) continue;
-
-    await dbUpsertMatch(match);
-
-    const embed      = buildMatchEmbed(match);
-    const tallyEmbed = buildVoteTallyEmbed(match, {});
-    const row        = buildVoteButtons(matchId, {});
-
-    const msg = await channel.send({ embeds: [embed, tallyEmbed], components: [row] });
-
-    // Persist the Discord message ID so it survives restarts
-    await dbSaveMessageId(matchId, msg.id, channel.id);
-
-    activeMatches.set(matchId, {
-      match,
-      votes:     {},
-      messageId: msg.id,
-      channelId: channel.id,
-      resolved:  false,
+    console.log(`🔍 ANNOUNCE_CHANNEL_ID: ${ANNOUNCE_CHANNEL_ID}`);
+    const channel = await client.channels.fetch(ANNOUNCE_CHANNEL_ID).catch(err => {
+      console.error('❌ Failed to fetch channel:', err.message);
+      return null;
     });
+    if (!channel) return console.error('❌ Announce channel not found.');
 
-    console.log(`✅ Announced match ${matchId}: ${match.homeTeam.name} vs ${match.awayTeam.name}`);
+    let matches;
+    try {
+      matches = await fetchTodaysMatches();
+    } catch (err) {
+      console.error('❌ Failed to fetch fixtures:', err.response?.data || err.message);
+      channel.send(`❌ API error: ${err.response?.data?.message || err.message}`);
+      return;
+    }
 
-    const kickoff = new Date(match.utcDate).getTime();
-    const checkAt = kickoff + 100 * 60 * 1000;
-    const delay   = checkAt - Date.now();
-    if (delay > 0) setTimeout(() => resolveMatch(matchId), delay);
-    else           resolveMatch(matchId);
+    if (!matches.length) {
+      channel.send('📅 No World Cup matches today. Check back tomorrow!');
+      return;
+    }
+
+    for (const match of matches) {
+      const matchId = match.id;
+      const existing = activeMatches.get(matchId);
+
+      // Already announced and has a valid Discord message — skip
+      if (existing?.messageId) {
+        console.log(`⏭️  Match ${matchId} already announced (messageId: ${existing.messageId}), skipping`);
+        continue;
+      }
+
+      // New match not in DB yet — insert it
+      if (!existing) {
+        await dbUpsertMatch(match);
+      }
+
+      const votes      = existing?.votes ?? {};
+      const embed      = buildMatchEmbed(match);
+      const tallyEmbed = buildVoteTallyEmbed(match, votes);
+      const row        = buildVoteButtons(matchId, votes);
+
+      const msg = await channel.send({ embeds: [embed, tallyEmbed], components: [row] });
+
+      await dbSaveMessageId(matchId, msg.id, channel.id);
+
+      activeMatches.set(matchId, {
+        match,
+        votes,
+        messageId: msg.id,
+        channelId: channel.id,
+        resolved:  false,
+      });
+
+      console.log(`✅ Announced match ${matchId}: ${match.homeTeam.name} vs ${match.awayTeam.name}`);
+
+      const kickoff = new Date(match.utcDate).getTime();
+      const delay   = kickoff + 100 * 60 * 1000 - Date.now();
+      if (delay > 0) setTimeout(() => resolveMatch(matchId), delay);
+      else           resolveMatch(matchId);
+    }
+  } finally {
+    announceInProgress = false;
   }
 }
 

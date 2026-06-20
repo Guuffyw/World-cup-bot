@@ -16,7 +16,6 @@ const client = new Client({
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  // If using SSL (e.g. Railway, Render, Supabase), uncomment:
   ssl: { rejectUnauthorized: false },
 });
 
@@ -29,7 +28,9 @@ async function initDB() {
       kickoff_utc   TIMESTAMPTZ NOT NULL,
       stage         TEXT,
       outcome       CHAR(1),          -- '1', 'X', or '2' — NULL until resolved
-      resolved      BOOLEAN NOT NULL DEFAULT FALSE
+      resolved      BOOLEAN NOT NULL DEFAULT FALSE,
+      message_id    TEXT,             -- Discord message ID for the announcement
+      channel_id    TEXT              -- Discord channel ID for the announcement
     );
 
     CREATE TABLE IF NOT EXISTS votes (
@@ -47,6 +48,10 @@ async function initDB() {
       points    INT  NOT NULL DEFAULT 0,
       total     INT  NOT NULL DEFAULT 0   -- total predictions made
     );
+
+    -- Add message_id / channel_id columns if upgrading from an older schema
+    ALTER TABLE matches ADD COLUMN IF NOT EXISTS message_id TEXT;
+    ALTER TABLE matches ADD COLUMN IF NOT EXISTS channel_id TEXT;
   `);
   console.log('✅ Database tables ready');
 }
@@ -67,6 +72,13 @@ async function dbUpsertMatch(match) {
   ]);
 }
 
+async function dbSaveMessageId(matchId, messageId, channelId) {
+  await pool.query(
+    `UPDATE matches SET message_id = $1, channel_id = $2 WHERE match_id = $3`,
+    [messageId, channelId, matchId]
+  );
+}
+
 async function dbSaveVote(matchId, userId, username, pick) {
   await pool.query(`
     INSERT INTO votes (match_id, user_id, username, pick)
@@ -80,26 +92,22 @@ async function dbGetVotes(matchId) {
     `SELECT user_id, pick FROM votes WHERE match_id = $1`,
     [matchId]
   );
-  // Return as { userId: pick } map for backwards-compat with existing helpers
   const votes = {};
   for (const row of res.rows) votes[row.user_id] = row.pick;
   return votes;
 }
 
 async function dbResolveMatch(matchId, outcome) {
-  // Mark match resolved
   await pool.query(
     `UPDATE matches SET outcome = $1, resolved = TRUE WHERE match_id = $2`,
     [outcome, matchId]
   );
 
-  // Mark each vote correct/incorrect
   await pool.query(
     `UPDATE votes SET correct = (pick = $1) WHERE match_id = $2`,
     [outcome, matchId]
   );
 
-  // Upsert leaderboard — award 1 point per correct pick
   const voters = await pool.query(
     `SELECT user_id, username, correct FROM votes WHERE match_id = $1`,
     [matchId]
@@ -136,19 +144,19 @@ const activeMatches = new Map();
 async function restoreActiveMatches() {
   const res = await pool.query(`SELECT * FROM matches WHERE resolved = FALSE`);
   for (const row of res.rows) {
-    const matchId = Number(row.match_id); // ← cast here
+    const matchId = Number(row.match_id);
     const votes = await dbGetVotes(matchId);
     activeMatches.set(matchId, {
       match: {
-        id: matchId,                          // ← also cast here
+        id: matchId,
         homeTeam: { name: row.home_team },
         awayTeam: { name: row.away_team },
         utcDate: row.kickoff_utc,
         stage: row.stage,
       },
       votes,
-      messageId: null,
-      channelId: process.env.ANNOUNCE_CHANNEL_ID,
+      messageId: row.message_id ?? null,   // ← restored from DB
+      channelId: row.channel_id ?? process.env.ANNOUNCE_CHANNEL_ID,
       resolved: false,
     });
   }
@@ -157,11 +165,11 @@ async function restoreActiveMatches() {
 
 // ─── API config ───────────────────────────────────────────────────────────────
 
-const FOOTBALL_API_KEY = process.env.FOOTBALL_API_KEY;
+const FOOTBALL_API_KEY    = process.env.FOOTBALL_API_KEY;
 const ANNOUNCE_CHANNEL_ID = process.env.ANNOUNCE_CHANNEL_ID;
-const WC_COMPETITION_ID = 'WC';
-const API_BASE = 'https://api.football-data.org/v4';
-const API_HEADERS = { 'X-Auth-Token': FOOTBALL_API_KEY };
+const WC_COMPETITION_ID   = 'WC';
+const API_BASE            = 'https://api.football-data.org/v4';
+const API_HEADERS         = { 'X-Auth-Token': FOOTBALL_API_KEY };
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
@@ -192,22 +200,22 @@ function getTally(votes) {
 // ─── Embed / component builders ──────────────────────────────────────────────
 
 function buildMatchEmbed(match) {
-  const home = match.homeTeam.name;
-  const away = match.awayTeam.name;
+  const home    = match.homeTeam.name;
+  const away    = match.awayTeam.name;
   const kickoff = new Date(match.utcDate);
-  const stage = match.stage ?? 'Unknown Stage';
-  const group = match.group ? ` — ${match.group}` : '';
+  const stage   = match.stage ?? 'Unknown Stage';
+  const group   = match.group ? ` — ${match.group}` : '';
 
   return new EmbedBuilder()
     .setColor(0xFFD700)
     .setTitle('⚽ FIFA World Cup 2026 — Match Prediction')
     .setDescription(`Cast your vote before kick-off!\n\n**1** → ${home} wins\n**X** → Draw\n**2** → ${away} wins`)
     .addFields(
-      { name: '🏠 Home', value: home, inline: true },
-      { name: '🆚', value: 'vs', inline: true },
-      { name: '✈️ Away', value: away, inline: true },
+      { name: '🏠 Home',     value: home,  inline: true },
+      { name: '🆚',          value: 'vs',  inline: true },
+      { name: '✈️ Away',     value: away,  inline: true },
       { name: '🕐 Kick-off', value: `<t:${Math.floor(kickoff.getTime() / 1000)}:F>`, inline: true },
-      { name: '🏆 Stage', value: `${stage}${group}`, inline: true },
+      { name: '🏆 Stage',    value: `${stage}${group}`, inline: true },
     )
     .setFooter({ text: `Match ID: ${match.id}` })
     .setTimestamp();
@@ -215,9 +223,9 @@ function buildMatchEmbed(match) {
 
 function buildVoteTallyEmbed(match, votes) {
   const tally = getTally(votes);
-  const home = match.homeTeam?.name ?? 'Home';
-  const away = match.awayTeam?.name ?? 'Away';
-  const fmt = (users) => users.length ? users.map(id => `<@${id}>`).join(', ') : '*No votes yet*';
+  const home  = match.homeTeam?.name ?? 'Home';
+  const away  = match.awayTeam?.name ?? 'Away';
+  const fmt   = (users) => users.length ? users.map(id => `<@${id}>`).join(', ') : '*No votes yet*';
 
   return new EmbedBuilder()
     .setColor(0x2B2D31)
@@ -253,32 +261,32 @@ function buildVoteButtons(matchId, votes = {}) {
 }
 
 function buildResultEmbed(match, votes) {
-  const home = match.homeTeam.name;
-  const away = match.awayTeam.name;
+  const home      = match.homeTeam.name;
+  const away      = match.awayTeam.name;
   const homeGoals = match.score?.fullTime?.home ?? 0;
   const awayGoals = match.score?.fullTime?.away ?? 0;
 
   let outcome;
-  if (homeGoals > awayGoals) outcome = '1';
+  if (homeGoals > awayGoals)      outcome = '1';
   else if (homeGoals === awayGoals) outcome = 'X';
-  else outcome = '2';
+  else                              outcome = '2';
 
   const outcomeLabel =
     outcome === '1' ? `${home} Win` : outcome === 'X' ? 'Draw' : `${away} Win`;
 
   const tally = getTally(votes);
-  const fmt = (users) => users.length ? users.map(id => `<@${id}>`).join(', ') : '*(nobody)*';
+  const fmt   = (users) => users.length ? users.map(id => `<@${id}>`).join(', ') : '*(nobody)*';
 
   return new EmbedBuilder()
     .setColor(outcome === '1' ? 0x3498DB : outcome === 'X' ? 0x95A5A6 : 0xE74C3C)
     .setTitle('🏆 Match Result — Predictions Resolved!')
     .addFields(
-      { name: '⚽ Final Score',      value: `**${home} ${homeGoals} – ${awayGoals} ${away}**`, inline: false },
-      { name: '🎯 Outcome',          value: outcomeLabel, inline: false },
-      { name: '📊 Votes Cast',       value: `1: ${tally['1'].length} · X: ${tally['X'].length} · 2: ${tally['2'].length}`, inline: false },
-      { name: `🏠 Voted ${home} Win`, value: fmt(tally['1']), inline: false },
-      { name: '🤝 Voted Draw',       value: fmt(tally['X']), inline: false },
-      { name: `✈️ Voted ${away} Win`, value: fmt(tally['2']), inline: false },
+      { name: '⚽ Final Score',        value: `**${home} ${homeGoals} – ${awayGoals} ${away}**`, inline: false },
+      { name: '🎯 Outcome',            value: outcomeLabel, inline: false },
+      { name: '📊 Votes Cast',         value: `1: ${tally['1'].length} · X: ${tally['X'].length} · 2: ${tally['2'].length}`, inline: false },
+      { name: `🏠 Voted ${home} Win`,  value: fmt(tally['1']), inline: false },
+      { name: '🤝 Voted Draw',         value: fmt(tally['X']), inline: false },
+      { name: `✈️ Voted ${away} Win`,  value: fmt(tally['2']), inline: false },
     )
     .setTimestamp();
 }
@@ -288,7 +296,7 @@ function buildLeaderboardEmbed(rows) {
 
   const lines = rows.map((row, i) => {
     const medal = medals[i] ?? `**${i + 1}.**`;
-    const acc = row.accuracy != null ? ` (${row.accuracy}% acc.)` : '';
+    const acc   = row.accuracy != null ? ` (${row.accuracy}% acc.)` : '';
     return `${medal} **${row.username}** — ${row.points} pt${row.points !== 1 ? 's' : ''}${acc} · ${row.total} picks`;
   });
 
@@ -298,6 +306,32 @@ function buildLeaderboardEmbed(rows) {
     .setDescription(lines.length ? lines.join('\n') : '*No predictions yet. Be the first!*')
     .setFooter({ text: '1 point awarded per correct prediction' })
     .setTimestamp();
+}
+
+// ─── Shared helper: edit the announcement message safely ─────────────────────
+
+async function safeEditMatchMessage(entry, matchId) {
+  if (!entry.messageId) {
+    console.warn(`⚠️  No messageId for match ${matchId} — skipping message edit`);
+    return;
+  }
+
+  try {
+    const channel  = await client.channels.fetch(entry.channelId).catch(() => null);
+    if (!channel)  { console.warn(`⚠️  Channel ${entry.channelId} not found`); return; }
+
+    const original = await channel.messages.fetch(entry.messageId);
+    if (!original || typeof original.edit !== 'function') {
+      console.warn(`⚠️  Could not fetch editable message ${entry.messageId}`);
+      return;
+    }
+
+    const updatedRow   = buildVoteButtons(matchId, entry.votes);
+    const updatedTally = buildVoteTallyEmbed(entry.match, entry.votes);
+    await original.edit({ embeds: [buildMatchEmbed(entry.match), updatedTally], components: [updatedRow] });
+  } catch (err) {
+    console.error(`⚠️  Could not update vote message for match ${matchId}:`, err.message);
+  }
 }
 
 // ─── Announce today's matches ─────────────────────────────────────────────────
@@ -336,12 +370,15 @@ async function announceTodaysMatches() {
 
     const msg = await channel.send({ embeds: [embed, tallyEmbed], components: [row] });
 
+    // Persist the Discord message ID so it survives restarts
+    await dbSaveMessageId(matchId, msg.id, channel.id);
+
     activeMatches.set(matchId, {
       match,
-      votes: {},
+      votes:     {},
       messageId: msg.id,
       channelId: channel.id,
-      resolved: false,
+      resolved:  false,
     });
 
     console.log(`✅ Announced match ${matchId}: ${match.homeTeam.name} vs ${match.awayTeam.name}`);
@@ -350,7 +387,7 @@ async function announceTodaysMatches() {
     const checkAt = kickoff + 100 * 60 * 1000;
     const delay   = checkAt - Date.now();
     if (delay > 0) setTimeout(() => resolveMatch(matchId), delay);
-    else resolveMatch(matchId);
+    else           resolveMatch(matchId);
   }
 }
 
@@ -377,11 +414,10 @@ async function resolveMatch(matchId) {
     return;
   }
 
-  // Guard against API returning null scores even when FINISHED
   const homeGoals = result.score?.fullTime?.home;
   const awayGoals = result.score?.fullTime?.away;
 
-  if (homeGoals === null || homeGoals === undefined || awayGoals === null || awayGoals === undefined) {
+  if (homeGoals == null || awayGoals == null) {
     console.log(`⏳ Match ${matchId} finished but scores not populated yet, retrying in 2 min…`);
     setTimeout(() => resolveMatch(matchId), 2 * 60 * 1000);
     return;
@@ -392,28 +428,31 @@ async function resolveMatch(matchId) {
   entry.resolved = true;
   entry.match    = result;
 
-  // Persist to DB and award points
   await dbResolveMatch(matchId, outcome);
 
   const channel = await client.channels.fetch(entry.channelId).catch(() => null);
   if (!channel) return;
 
-  // Update original message
+  // Disable buttons and mark tally as final on the original message
   if (entry.messageId) {
     try {
       const original = await channel.messages.fetch(entry.messageId);
-      const disabledRow = new ActionRowBuilder().addComponents(
-        ...buildVoteButtons(matchId, entry.votes).components.map(b =>
-          ButtonBuilder.from(b.toJSON()).setDisabled(true)
-        )
-      );
-      const closedTally = buildVoteTallyEmbed(entry.match, entry.votes)
-        .setTitle('📊 Final Vote Breakdown')
-        .setColor(0x57F287)
-        .setFooter({ text: `Voting closed · Total votes: ${Object.keys(entry.votes).length}` });
+      if (original && typeof original.edit === 'function') {
+        const disabledRow = new ActionRowBuilder().addComponents(
+          ...buildVoteButtons(matchId, entry.votes).components.map(b =>
+            ButtonBuilder.from(b.toJSON()).setDisabled(true)
+          )
+        );
+        const closedTally = buildVoteTallyEmbed(entry.match, entry.votes)
+          .setTitle('📊 Final Vote Breakdown')
+          .setColor(0x57F287)
+          .setFooter({ text: `Voting closed · Total votes: ${Object.keys(entry.votes).length}` });
 
-      await original.edit({ embeds: [buildMatchEmbed(entry.match), closedTally], components: [disabledRow] });
-    } catch (_) {}
+        await original.edit({ embeds: [buildMatchEmbed(entry.match), closedTally], components: [disabledRow] });
+      }
+    } catch (err) {
+      console.warn(`⚠️  Could not edit original message on resolve:`, err.message);
+    }
   }
 
   const resultEmbed = buildResultEmbed(result, entry.votes);
@@ -444,15 +483,8 @@ client.on('interactionCreate', async interaction => {
   // Persist vote to DB
   await dbSaveVote(matchId, interaction.user.id, interaction.user.username, pick);
 
-  // Update original message
-  try {
-    const original     = await interaction.channel.messages.fetch(entry.messageId);
-    const updatedRow   = buildVoteButtons(matchId, entry.votes);
-    const updatedTally = buildVoteTallyEmbed(entry.match, entry.votes);
-    await original.edit({ embeds: [buildMatchEmbed(entry.match), updatedTally], components: [updatedRow] });
-  } catch (err) {
-    console.error('⚠️ Could not update vote message:', err.message);
-  }
+  // Update the announcement message safely
+  await safeEditMatchMessage(entry, matchId);
 
   const labels = { '1': '🏠 Home Win', 'X': '🤝 Draw', '2': '✈️ Away Win' };
   const msg = previous
@@ -514,26 +546,27 @@ client.on('messageCreate', async msg => {
   if (msg.content === '!wc debug') {
     const lines = [];
     for (const [key, entry] of activeMatches.entries()) {
-      lines.push(`key: \`${key}\` (${typeof key}) — ${entry.match.homeTeam.name} vs ${entry.match.awayTeam.name} — votes: ${Object.keys(entry.votes).length}`);
+      lines.push(
+        `key: \`${key}\` (${typeof key}) — ` +
+        `${entry.match.homeTeam.name} vs ${entry.match.awayTeam.name} — ` +
+        `votes: ${Object.keys(entry.votes).length} — ` +
+        `messageId: ${entry.messageId ?? 'none'}`
+      );
     }
     await msg.reply(lines.length ? lines.join('\n') : 'No active matches in memory.');
   }
 
   if (msg.content.startsWith('!wc raw ')) {
-  const id = Number(msg.content.split(' ')[2]);
-  if (!id) return msg.reply('Usage: `!wc raw <matchId>`');
-  try {
-    const result = await fetchMatchResult(id);
-    await msg.reply('```json\n' + JSON.stringify(result?.score, null, 2) + '\n```');
-  } catch (err) {
-    await msg.reply(`❌ ${err.message}`);
+    const id = Number(msg.content.split(' ')[2]);
+    if (!id) return msg.reply('Usage: `!wc raw <matchId>`');
+    try {
+      const result = await fetchMatchResult(id);
+      await msg.reply('```json\n' + JSON.stringify(result?.score, null, 2) + '\n```');
+    } catch (err) {
+      await msg.reply(`❌ ${err.message}`);
+    }
   }
- } 
-
-  
 });
-
-
 
 // ─── Startup ──────────────────────────────────────────────────────────────────
 
@@ -545,11 +578,12 @@ client.once('ready', async () => {
   await initDB();
   await restoreActiveMatches();
 
-  cron.schedule('0 0 * * *', () => {
+  cron.schedule('0 7 * * *', () => {
     announceTodaysMatches();
   }, {
-    timezone: "Europe/Budapest"
+    timezone: 'Europe/Budapest',
   });
+
   announceTodaysMatches();
 });
 

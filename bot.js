@@ -535,13 +535,28 @@ client.on('messageCreate', async msg => {
     await msg.reply('📡 Fetching today\'s World Cup matches…');
     await announceTodaysMatches();
   }
+  
+if (msg.content.startsWith('!wc resolve ')) {
+  console.log('Resolve command received:', msg.content);
 
-  if (msg.content.startsWith('!wc resolve ')) {
-    const id = Number(msg.content.split(' ')[2]);
-    if (!id) return msg.reply('Usage: `!wc resolve <matchId>`');
-    await msg.reply(`🔍 Resolving match ${id}…`);
-    await resolveMatch(id);
+  const id = Number(msg.content.split(' ')[2]);
+  console.log('Match ID:', id);
+
+  if (!id) {
+    console.log('Invalid match ID');
+    return msg.reply('Usage: `!wc resolve <matchId>`');
   }
+
+  try {
+    await msg.reply(`🔍 Resolving match ${id}…`);
+    console.log('Calling resolveMatch...');
+    await resolveMatch(id);
+    console.log('resolveMatch completed successfully');
+  } catch (err) {
+    console.error('resolveMatch failed:', err);
+    await msg.reply('❌ An error occurred while resolving the match.');
+  }
+}
 
   if (msg.content === '!wc test') {
     await msg.reply('📡 Testing API connection…');

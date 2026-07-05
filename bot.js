@@ -494,6 +494,11 @@ async function resolveMatch(matchId) {
 
   const resultEmbed = buildResultEmbed(result, entry.votes);
   await channel.send({ embeds: [resultEmbed] });
+
+  // Post updated leaderboard right after resolving
+  const leaderboardRows = await dbGetLeaderboard(15);
+  await channel.send({ content: '📊 **New standings are:**' });
+  await channel.send({ embeds: [buildLeaderboardEmbed(leaderboardRows)] });
 }
 // ─── Button interaction handler ───────────────────────────────────────────────
 

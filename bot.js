@@ -264,13 +264,13 @@ function buildVoteButtons(matchId, votes = {}) {
 function buildResultEmbed(match, votes) {
   const home      = match.homeTeam.name;
   const away      = match.awayTeam.name;
-  const homeGoals = match.score?.fullTime?.home ?? 0;
-  const awayGoals = match.score?.fullTime?.away ?? 0;
+  const homeGoals = match.score?.regularTime?.home ?? match.score?.fullTime?.home ?? 0;
+  const awayGoals = match.score?.regularTime?.away ?? match.score?.fullTime?.away ?? 0;
 
   let outcome;
-  if (homeGoals > awayGoals)      outcome = '1';
+  if (homeGoals > awayGoals)        outcome = '1';
   else if (homeGoals === awayGoals) outcome = 'X';
-  else                              outcome = '2';
+  else                               outcome = '2';
 
   const outcomeLabel =
     outcome === '1' ? `${home} Win` : outcome === 'X' ? 'Draw' : `${away} Win`;
@@ -419,7 +419,6 @@ async function resolveMatch(matchId) {
   let result;
   try {
     result = await fetchMatchResult(matchId);
-    console.log(`🔍 Raw API result for ${matchId}:`, JSON.stringify(result, null, 2));
   } catch (err) {
     console.error(`❌ Could not fetch result for ${matchId}:`, err.message);
     setTimeout(() => resolveMatch(matchId), 5 * 60 * 1000);
@@ -427,17 +426,24 @@ async function resolveMatch(matchId) {
   }
 
   const status = result?.status;
+  const label  = `${result?.homeTeam?.name ?? '?'} vs ${result?.awayTeam?.name ?? '?'}`;
+
+  // Prefer regularTime (90-min score) if present, otherwise fall back to fullTime
+  const liveHome = result?.score?.regularTime?.home ?? result?.score?.fullTime?.home;
+  const liveAway = result?.score?.regularTime?.away ?? result?.score?.fullTime?.away;
+  const liveScore = `${liveHome ?? '-'}-${liveAway ?? '-'}`;
+
   if (!['FINISHED', 'AWARDED'].includes(status)) {
-    console.log(`⏳ Match ${matchId} not finished yet (${status}), retrying in 5 min…`);
+    console.log(`⏳ [${matchId}] ${label} — ${liveScore} (${status}), retrying in 5 min…`);
     setTimeout(() => resolveMatch(matchId), 5 * 60 * 1000);
     return;
   }
 
-  const homeGoals = result.score?.fullTime?.home;
-  const awayGoals = result.score?.fullTime?.away;
+  const homeGoals = result.score?.regularTime?.home ?? result.score?.fullTime?.home;
+  const awayGoals = result.score?.regularTime?.away ?? result.score?.fullTime?.away;
 
   if (homeGoals == null || awayGoals == null) {
-    console.log(`⏳ Match ${matchId} finished but scores not populated yet, retrying in 2 min…`);
+    console.log(`⏳ [${matchId}] ${label} finished but score not populated yet, retrying in 2 min…`);
     setTimeout(() => resolveMatch(matchId), 2 * 60 * 1000);
     return;
   }
@@ -448,6 +454,18 @@ async function resolveMatch(matchId) {
   entry.match    = result;
 
   await dbResolveMatch(matchId, outcome);
+
+  // Who scored points, for a clean console summary
+  const voterRows = await pool.query(
+    `SELECT username, correct FROM votes WHERE match_id = $1`,
+    [matchId]
+  );
+  const winners = voterRows.rows.filter(r => r.correct).map(r => r.username);
+  const winnerText = winners.length
+    ? `${winners.join(', ')} +1 point${winners.length > 1 ? 's' : ''}`
+    : 'no correct picks';
+
+  console.log(`✅ Resolved match ${matchId} (${label} ${homeGoals}-${awayGoals}) — outcome: ${outcome} — ${winnerText}`);
 
   const channel = await client.channels.fetch(entry.channelId).catch(() => null);
   if (!channel) return;
@@ -476,9 +494,7 @@ async function resolveMatch(matchId) {
 
   const resultEmbed = buildResultEmbed(result, entry.votes);
   await channel.send({ embeds: [resultEmbed] });
-  console.log(`✅ Resolved match ${matchId} — outcome: ${outcome}`);
 }
-
 // ─── Button interaction handler ───────────────────────────────────────────────
 
 client.on('interactionCreate', async interaction => {
